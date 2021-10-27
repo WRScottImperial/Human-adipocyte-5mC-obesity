@@ -24,7 +24,7 @@ msd = anno[,c(52:53)]; colnames(msd)=c("meanMeth","sdMeth")
 # generate a background table of all cgs, excluding sentinels and cgs within 5kb of a sentinel
 
 hits=data.frame(msd[as.character(sentinels$CG),])
-hits$IlmnID=as.character(rownames(hits))
+hits$CG=as.character(rownames(hits))
 hits_anno = anno[anno$ID %in% hits$CG,]
 
 for(c in 1:length(hits$CG)){
@@ -49,7 +49,8 @@ colnames(p1k)=c("SD","Mean")
 # generate permutation set (nrows = number of sentinels, ncols =1000 )
 
 matches = matrix(nrow=nrow(hits), ncol=1000)
-colnames(matches)=as.character(seq(from =1 , to =1000, 1))
+colnames(matches) = as.character(seq(from =1 , to =1000, 1))
+rownames(matches) = hits$CG
 matchParameters = matrix(nrow=nrow(hits), ncol=3)
 colnames(matchParameters)=c("mean_threshold","sd_threshold","n_matches")
 
