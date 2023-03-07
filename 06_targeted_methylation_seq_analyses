@@ -1,0 +1,192 @@
+#############################################################################################
+
+##### Targeted Methylation Sequencing (TMS) analyses
+
+#############################################################################################
+
+##### Overview:
+
+### 1. load TMS bedgraph and annotation files into a methrix object 
+### 2. Basic quality filtering
+### 3. Probe and sample level quality filtering
+### 4. Run association models separately in subcutaneous and visceral adipocytes
+
+#############################################################################################
+
+library(methrix)
+library(BSgenome.Hsapiens.UCSC.hg19) 
+library(GenomicRanges)
+library(patchwork)
+library(reshape2)
+library(tidyverse)
+library(qvalue)
+
+#############################################################################################
+
+### 1. load TMS bedgraph and annotation files into a methrix object 
+
+# load TMS target region coordinates (TWIST panel)
+
+target_coord = read.table(".../Target_bases_covered_by_probes_Methyl_ICL_MethylationPanel.bed")
+target_coord_gr = GenomicRanges::GRanges(seqnames = paste0("chr",target_coord$V1), ranges = IRanges(target_coord$V2,target_coord$V3))
+
+# load phenotype data for 94 TMS samples
+
+phe=read.delim('.../phe.tms.human.adipocytes.txt', header=T)
+
+# read in TMS bedgraph files with methrix and intersect with known CpG site reference from UCSC
+
+hg19_cpgs = methrix::extract_CPGs(ref_genome = "BSgenome.Hsapiens.UCSC.hg19")
+tms_bed = list.files(".../TWIST_TMS_pipeline_outs/", pattern = "_CpG.bedGraph", full.names = T)
+print(basename(tms_bed))
+
+meth <- methrix::read_bedgraphs(
+  files = tms_bed, 
+  ref_cpgs = hg19_cpgs,
+  pipeline = "MethylDackel", coldata = phe,  vect = FALSE,
+  h5 = TRUE)
+
+# save unprocessed data as HDF5
+
+target_dir = ".../TWIST_tms_analysis/"
+save_HDF5_methrix(meth, dir = paste0(target_dir,"unclean_methrix/"))
+
+#############################################################################################
+
+### 2. Basic quality filtering
+
+meth <- load_HDF5_methrix(dir = paste0(target_dir,"unclean_methrix/"))
+meth <- methrix::mask_methrix(meth, low_count = 10, high_quantile = NULL) 
+meth <- methrix::remove_uncovered(meth) 
+meth = methrix::subset_methrix(m = meth, regions = target_coord_gr)
+meth <- methrix::remove_snps(m = meth, keep = TRUE) 
+
+save_HDF5_methrix(meth$snp_filtered, dir = paste0(target_dir,"clean_methrix/"))
+
+#############################################################################################
+
+### 3. Probe and sample level quality filtering
+
+meth <- load_HDF5_methrix(dir = paste0(target_dir,"clean_methrix/"))
+methmat = methrix::get_matrix(m = meth, type = "M", add_loci = TRUE, in_granges = TRUE)
+covmat = methrix::get_matrix(m = meth, type = "C", add_loci = TRUE, in_granges = TRUE)
+sites = paste0(methmat$seqnames,":",methmat$start,"_",methmat$end)
+
+# make qc plots 
+
+qc_plots = list()
+
+# methrix plots
+
+qc_plots$pre$samp_cov_dens = methrix::plot_coverage(m = meth, type = "dens")
+qc_plots$pre$casecontrol_cov_dens = methrix::plot_coverage(m = meth, type = "dens", pheno = "CaseControl", perGroup = TRUE)
+qc_plots$pre$tissue_cov_dens = methrix::plot_coverage(m = meth, type = "dens", pheno = "Tissue", perGroup = TRUE)
+qc_plots$pre$group_cov_dens = methrix::plot_coverage(m = meth, type = "dens", pheno = "group", perGroup = TRUE)
+qc_plots$pre$samp_meth_dens = methrix::plot_density(m=meth)
+qc_plots$pre$samp_meth_vio = methrix::plot_violin(m = meth)
+
+# sample coverage plots
+
+qc_plots$pre$samp_cov_bar = reshape2::melt(as.data.table(covmat), id.vars=1:5) %>%
+  ggplot() + 
+  geom_boxplot(aes(x = variable, y = value)) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  geom_hline(yintercept = 25, linetype = 2) +
+  geom_hline(yintercept = 50, linetype = 3) +
+  geom_hline(yintercept = 75, linetype = 4) +
+  xlab(label = "sample") + ylab(label = "coverage")
+
+# probe coverage plots
+
+probe_cov = covmat
+target_regions = paste0(seqnames(anno$target_coord_gr),":",start(anno$target_coord_gr),"-",end(anno$target_coord_gr))
+target_regions = target_regions[subjectHits(findOverlaps(probe_cov,anno$target_coord_gr))]
+probe_cov = as.data.frame(probe_cov)
+probe_cov = cbind(target_regions,probe_cov)
+probe_cov = probe_cov[,c(1,7:ncol(probe_cov))]
+probe_cov = aggregate(.~target_regions, probe_cov, FUN=mean, na.rm=TRUE, na.action=NULL)
+probe_cov = t(probe_cov)
+colnames(probe_cov) <- probe_cov[1,]
+probe_cov <- as.data.frame(probe_cov[-1, ])
+probe_cov$samp = rownames(probe_cov)
+qc_plots$pre$probe_cov_bar = reshape2::melt(probe_cov, id.vars= "samp") %>%
+  ggplot() + 
+  geom_boxplot(aes(x = variable, y = as.numeric(value))) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  geom_hline(yintercept = 50) +
+  xlab(label = "sample") + ylab(label = "coverage")
+
+# filter out low coverage probes (cov <25x)
+
+probe_filter = 25
+new_meth <- methrix::mask_methrix(new_meth, low_count = probe_filter,  high_quantile = 0.99999)
+
+# filter out low coverage samples (mean cov <25x)
+
+sample_filter = 25
+keep = as.data.table(covmat)
+keep = colMeans(keep[6:ncol(keep)],na.rm=T) > sample_filter
+keep = keep[keep]
+keep = keep[!is.na(keep)]
+keep = names(keep)
+new_meth <- methrix::subset_methrix(new_meth, samples = keep)
+new_methmat = methrix::get_matrix(m = new_meth, type = "M", add_loci = TRUE, in_granges = FALSE)
+new_covmat = methrix::get_matrix(m =new_meth, type = "C", add_loci = TRUE, in_granges = FALSE)
+new_sites = paste0(new_methmat$chr,":",new_methmat$start,"_",new_methmat$start+1)
+
+#############################################################################################
+
+### 4. Run association models separately in subcutaneous and visceral adipocytes
+
+model = as.formula('tms.sel[i,] ~ phe$CaseControl + as.factor(phe$Sex) + as.numeric(phe$Age) + as.factor(phe$Eth)')
+lfla=model
+
+# Subset datasets by SA and run model
+
+tms.phe = colData(new_methmat)
+phe = tms.phe[which(tms.phe$Tissue =='SA'),]
+tms.sel = as.matrix(new_methmat[,which( colnames(new_methmat)  %in% rownames(phe) ), with = F])
+
+res=matrix(nrow=nrow(tms.sel), ncol=5)
+for(i in 1:nrow(tms.sel)){
+  tryCatch({fit = summary(lm(lfla)) }, error = function(error) {return(NA)})
+  if(!exists("fit")){
+    res[i,]=NA
+  }else{
+    res[i,]=c(fit$coefficients[2,],fit$df[2])
+  }
+  if(i%%1000==0){ print(paste(modName,i,sep=" ")) }
+}
+res = as.data.frame(res)
+colnames(res)=paste(modName,c("beta","se","t","pval","df"),sep="_")
+res$qval = qvalue::qvalue(res[,4])$qvalue
+print(head(res))
+rownames(res) = new_sites
+
+write.csv(res,paste0(target_dir,"/mosa_model_cov_25.csv"))
+
+# Subset datasets by VA and run model
+
+tms.phe = colData(new_methmat)
+phe = tms.phe[which(tms.phe$Tissue =='VA'),]
+tms.sel = as.matrix(new_methmat[,which( colnames(new_methmat)  %in% rownames(phe) ), with = F])
+
+res=matrix(nrow=nrow(tms.sel), ncol=5)
+for(i in 1:nrow(tms.sel)){
+  tryCatch({fit = summary(lm(lfla)) }, error = function(error) {return(NA)})
+  if(!exists("fit")){
+    res[i,]=NA
+  }else{
+    res[i,]=c(fit$coefficients[2,],fit$df[2])
+  }
+  if(i%%1000==0){ print(paste(modName,i,sep=" ")) }
+}
+res = as.data.frame(res)
+colnames(res)=paste(modName,c("beta","se","t","pval","df"),sep="_")
+res$qval = qvalue::qvalue(res[,4])$qvalue
+print(head(res))
+rownames(res) = new_sites
+
+write.csv(res,paste0(target_dir,"/mova_model_cov_25.csv"))
+
+#############################################################################################
