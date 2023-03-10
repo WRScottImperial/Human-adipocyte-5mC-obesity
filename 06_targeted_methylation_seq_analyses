@@ -143,7 +143,7 @@ lfla=model
 
 # Subset datasets by SA and run model
 
-tms.phe = colData(new_methmat)
+tms.phe = colData(new_meth)
 phe = tms.phe[which(tms.phe$Tissue =='SA'),]
 tms.sel = as.matrix(new_methmat[,which( colnames(new_methmat)  %in% rownames(phe) ), with = F])
 
@@ -167,7 +167,7 @@ write.csv(res,paste0(target_dir,"/mosa_model_cov_25.csv"))
 
 # Subset datasets by VA and run model
 
-tms.phe = colData(new_methmat)
+tms.phe = colData(new_meth)
 phe = tms.phe[which(tms.phe$Tissue =='VA'),]
 tms.sel = as.matrix(new_methmat[,which( colnames(new_methmat)  %in% rownames(phe) ), with = F])
 
